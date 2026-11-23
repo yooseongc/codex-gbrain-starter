@@ -2,9 +2,30 @@
 
 팀 서버에 GBrain과 PostgreSQL을 한 번 설치합니다. LibreChat 서버와 각 팀원의 Oh My Pi는 같은 HTTPS 주소로 MCP 요청을 보내고, GBrain은 요청에 담긴 개인별 토큰으로 권한을 확인합니다. 팀원 PC에는 Docker가 필요하지 않습니다.
 
-이 예시는 **팀 전용 신규 설치**, 서버 호스트에서 동작하는 HTTPS 리버스 프록시, 사내 DNS 이름 `brain.corp.example`을 가정합니다. 예시 호스트명과 사용자 이름은 실제 값으로 바꾸세요.
+아래 기본 구성은 팀 전용 서버의 고정 IPv4 주소와 Nginx 컨테이너를 사용합니다. 예시 주소 `10.20.30.40`을 서버에 할당된 실제 사내 IP로 바꾸세요.
 
-## 1. 서버에서 원격 MCP 시작
+## 1. Nginx 컨테이너로 원격 MCP 시작
+
+1. 서버에 저장소를 복제하고 루트에서 `python setup.py`를 실행하세요. 생성된 `.env`에 `GBRAIN_LAN_IP=10.20.30.40`을 추가하세요. 호스트 포트는 기본 80입니다. 변경하려면 `GBRAIN_TLS_PORT`를 설정하고 아래 클라이언트 주소와 허용 목록에도 같은 포트를 쓰세요.
+2. 저장소 루트에 `tls/` 폴더를 만드세요. 사내 CA가 발급한 서버 인증서와 중간 인증서 체인을 `tls/fullchain.pem`, 대응하는 개인 키를 `tls/privkey.pem`으로 배치하세요. 인증서의 SAN에 실제 서버 주소가 IP 항목으로 들어 있어야 합니다. 개인 키는 서버 관리자만 읽을 수 있게 보관하세요. LibreChat 컨테이너와 Oh My Pi 실행 환경에는 사내 CA의 루트 인증서를 신뢰하도록 설정하세요.
+3. 같은 폴더에서 다음 명령을 실행하세요. 호스트의 해당 IP와 포트가 비어 있어야 합니다.
+
+```sh
+docker compose -f compose.yaml -f compose.nginx.yaml config --quiet
+docker compose -f compose.yaml -f compose.nginx.yaml up -d --build nginx
+```
+
+이 명령은 PostgreSQL, GBrain, Nginx를 실행합니다. 팀원은 `https://10.20.30.40:80/mcp`로 접속합니다. Nginx가 TLS를 처리하고 Docker 네트워크의 `http://gbrain:3131/mcp`로 전달합니다. 서버 방화벽에서는 팀원과 LibreChat이 접속할 사내 대역에 TCP 80을 허용하세요. 이후 구성 갱신에도 같은 두 Compose 파일을 지정하세요.
+
+LibreChat 서버나 팀원 PC에서 다음 명령으로 확인하세요. 인증서를 신뢰하고 GBrain에 도달하면 토큰이 없는 요청에 HTTP 401이 돌아옵니다.
+
+```sh
+curl --cacert company-root-ca.pem -i https://10.20.30.40:80/mcp
+```
+
+### 기존 사내 HTTPS 프록시를 사용하는 경우
+
+아래는 기존 프록시와 DNS를 사용하는 별도 설치 방법입니다. 이 방법을 택하면 이후 클라이언트 예시의 주소를 `https://brain.corp.example/mcp`, 허용 항목을 `brain.corp.example:443`으로 바꾸세요.
 
 서버에 저장소를 복제한 뒤 저장소 루트에서 `python setup.py`를 실행합니다. 생성된 `.env`에 다음 한 줄을 추가하고, 아래 내용을 같은 폴더의 `compose.override.yaml`로 저장하세요. Compose가 기본 파일과 자동으로 병합합니다.
 
@@ -66,12 +87,12 @@ readable_by: [alice, "group:team"]
 ```yaml
 mcpSettings:
   allowedAddresses:
-    - "brain.corp.example:443"
+    - "10.20.30.40:80"
 
 mcpServers:
   gbrain-team:
     type: streamable-http
-    url: "https://brain.corp.example/mcp"
+    url: "https://10.20.30.40:80/mcp"
     startup: false
     requiresOAuth: false
     headers:
@@ -82,7 +103,7 @@ mcpServers:
         description: "관리자가 발급한 본인 토큰을 입력하세요."
 ```
 
-LibreChat 서버에 설정을 반영하고 재시작합니다. 사용자는 채팅 도구 메뉴에서 `gbrain-team`을 선택하고 개인 토큰을 입력합니다. 주소 차단 또는 인증서 오류가 발생하면 **LibreChat 컨테이너 안에서** 사내 DNS, 허용 목록, 사내 CA 신뢰 설정을 확인하세요.
+LibreChat 서버에 설정을 반영하고 재시작합니다. 사용자는 채팅 도구 메뉴에서 `gbrain-team`을 선택하고 개인 토큰을 입력합니다. 주소 차단 또는 인증서 오류가 발생하면 **LibreChat 컨테이너 안에서** IP 도달 여부, 허용 목록, 사내 CA 신뢰 설정을 확인하세요.
 
 ## 4. Oh My Pi 연결
 
@@ -93,7 +114,7 @@ LibreChat 서버에 설정을 반영하고 재시작합니다. 사용자는 채�
   "mcpServers": {
     "gbrain-team": {
       "type": "http",
-      "url": "https://brain.corp.example/mcp",
+      "url": "https://10.20.30.40:80/mcp",
       "headers": { "Authorization": "Bearer ${GBRAIN_TEAM_TOKEN}" }
     }
   }
@@ -108,4 +129,4 @@ LibreChat 서버에 설정을 반영하고 재시작합니다. 사용자는 채�
 2. Bob이 Oh My Pi에서 “gbrain-team으로 `team/connection-test`를 읽어 줘”라고 요청해 같은 문장을 확인합니다.
 3. Bob이 그 테스트 문서의 수정을 요청합니다. 읽기 전용 토큰이면 쓰기 도구가 제공되지 않거나 서버가 요청을 거부해야 합니다. Alice가 다시 읽어 원문이 유지됐는지 확인합니다.
 
-연결은 성공했는데 문서가 보이지 않으면 토큰의 자료 공간, 페이지의 `readable_by`, 사용자의 그룹을 확인하세요. 이 절차가 사내 배포의 인수 테스트입니다. 실제 사내 DNS·인증서와 운영 중인 LibreChat 버전에서의 결과는 배포 환경에서 확인해야 합니다.
+연결은 성공했는데 문서가 보이지 않으면 토큰의 자료 공간, 페이지의 `readable_by`, 사용자의 그룹을 확인하세요. 이 절차가 사내 배포의 인수 테스트입니다. 실제 사내 주소·인증서와 운영 중인 LibreChat 버전에서의 결과는 배포 환경에서 확인해야 합니다.

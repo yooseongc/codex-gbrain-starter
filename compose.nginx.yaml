@@ -1,0 +1,23 @@
+services:
+  gbrain:
+    environment:
+      GBRAIN_PUBLIC_URL: https://${GBRAIN_LAN_IP:?Set GBRAIN_LAN_IP in .env}:${GBRAIN_TLS_PORT:-80}
+    command:
+      - sh
+      - -ec
+      - |
+        if [ ! -s /root/.gbrain/config.json ]; then
+          gbrain init --url "$$GBRAIN_DATABASE_URL" --no-embedding
+        fi
+        exec gbrain serve --http --bind 0.0.0.0 --port 3131 --public-url "$$GBRAIN_PUBLIC_URL"
+
+  nginx:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    depends_on:
+      - gbrain
+    ports:
+      - "${GBRAIN_LAN_IP:?Set GBRAIN_LAN_IP in .env}:${GBRAIN_TLS_PORT:-80}:8443"
+    volumes:
+      - ./nginx/mcp.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${GBRAIN_TLS_DIR:-./tls}:/etc/nginx/tls:ro
