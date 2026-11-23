@@ -2,6 +2,8 @@
 
 Codex에서 프로젝트별 결정과 작업 기록을 이어 쓰는 로컬 환경입니다. GBrain은 PostgreSQL에 기록을 저장하고, WebUI에서는 문서 제목과 본문을 검색할 수 있습니다. 기본 구성은 임베딩이나 외부 모델 API 키 없이 실행됩니다.
 
+여러 사람이 같은 기록을 검색하고 작성하려면 [사내망 배포 및 LibreChat·Oh My Pi 연결 가이드](docs/team-intranet.md)를 따르세요. 아래 설치 절차는 개인 PC에서 시작할 때 사용합니다.
+
 ## 설치
 
 Git, Python 3.8 이상, Docker Compose가 필요합니다. Windows에서는 아래 명령의 `python`을 `py`로 바꿔도 됩니다.
