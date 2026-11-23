@@ -1,0 +1,203 @@
+diff --git a/server/auth.ts b/server/auth.ts
+index a5f40fa..9c6173e 100644
+--- a/server/auth.ts
++++ b/server/auth.ts
+@@ -152,10 +152,14 @@ export class AuthService {
+       return new Response(loginPage(next, korean ? "비밀번호가 올바르지 않습니다." : "Incorrect password.", korean ? "ko" : "en"), { status: 401, headers: { ...headers, "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+     }
+     this.attempts.delete(key);
++    return this.startSession(next, headers, network.secure);
++  }
++
++  startSession(next: string, headers: HeadersInit, secure: boolean): Response {
+     const maxAge = Math.floor(this.config.sessionHours * 3600);
+     const payload = `${Date.now() + maxAge * 1000}:${randomUUID()}`;
+     const token = `${payload}.${this.signature(payload)}`;
+-    return new Response(null, { status: 303, headers: { ...headers, Location: next, "Set-Cookie": this.sessionCookie(network.secure, token, maxAge), "Cache-Control": "no-store" } });
++    return new Response(null, { status: 303, headers: { ...headers, Location: next, "Set-Cookie": this.sessionCookie(secure, token, maxAge), "Cache-Control": "no-store" } });
+   }
+ 
+   logout(
+diff --git a/server/graph-repository.ts b/server/graph-repository.ts
+index 863c1d6..fb36eb3 100644
+--- a/server/graph-repository.ts
++++ b/server/graph-repository.ts
+@@ -218,6 +218,17 @@ export class GraphRepository {
+     });
+   }
+ 
++  async searchDocumentBodies(query: string): Promise<number[]> {
++    const rows = await this.sql.unsafe<{ id: number }[]>(`
++      SELECT p.id FROM "${this.config.db.schema}".pages p
++      WHERE p.deleted_at IS NULL AND p.source_id = ANY($1::text[])
++        AND strpos(lower(p.compiled_truth), lower($2)) > 0
++        AND NOT EXISTS (SELECT 1 FROM "${this.config.db.schema}".tags t
++                        WHERE t.page_id = p.id AND t.tag = 'brain-map')`,
++      [this.config.allowedSourceIds, query]);
++    return rows.map(row => row.id);
++  }
++
+   async getNodeDetail(pageId: number, sourceId: string): Promise<NodeDetailRow | null> {
+     const rows = await this.sql.begin(async (tx) => {
+       await tx`SET TRANSACTION READ ONLY`;
+diff --git a/server/graph.ts b/server/graph.ts
+index b6aa391..547b79f 100644
+--- a/server/graph.ts
++++ b/server/graph.ts
+@@ -231,6 +231,10 @@ export class GraphService {
+     return buildGraphTimeline(bundle.graph.generatedAt, stableIdByPageId, [...pages], versions);
+   }
+ 
++  searchDocumentBodies(query: string) {
++    return this.repository.searchDocumentBodies(query);
++  }
++
+   async getNodeDetail(id: string): Promise<NodeDetailResponse | null> {
+     const bundle = await this.getActiveBundle();
+     const node = bundle.nodeById.get(id);
+diff --git a/server/http.ts b/server/http.ts
+index 950e72a..b29e1e7 100644
+--- a/server/http.ts
++++ b/server/http.ts
+@@ -32,6 +32,7 @@ export interface GraphHttpService {
+   getSerializedGraph(): Promise<string>;
+   getGraphHistory(): Promise<GraphTimelineResponse>;
+   getNodeDetail(id: string): Promise<NodeDetailResponse | null>;
++  searchDocumentBodies(query: string): Promise<number[]>;
+   getRebuildStatus(): GraphRebuildStatus;
+   startRebuild(): GraphRebuildAccepted;
+   getFreshness?(): unknown;
+@@ -175,6 +176,8 @@ export function createHttpHandler(deps: HttpHandlerDependencies): HttpHandler {
+       headers: { ...baseHeaders, ...extra, "Cache-Control": "no-store" },
+     });
+     const url = new URL(request.url);
++    const localAutoLogin = process.env.APP_LOCAL_AUTO_LOGIN === "true"
++      && ["127.0.0.1", "localhost"].includes(url.hostname);
+     try {
+       if (url.pathname === "/healthz" && (request.method === "GET" || request.method === "HEAD")) {
+         return new Response(request.method === "HEAD" ? null : "ok", { headers: { ...baseHeaders, "Cache-Control": "no-store" } });
+@@ -187,6 +190,12 @@ export function createHttpHandler(deps: HttpHandlerDependencies): HttpHandler {
+         });
+       }
+       if (url.pathname === "/auth/login" && request.method === "GET") {
++        if (localAutoLogin) {
++          const target = new URL(url.searchParams.get("next") || "/", url);
++          const next = target.origin === url.origin && !target.pathname.startsWith("//") && !target.pathname.startsWith("/auth/")
++            ? target.pathname + target.search : "/";
++          return deps.auth.startSession(next, baseHeaders, responseNetwork.secure);
++        }
+         if (deps.auth.isAuthenticated(request)) return new Response(null, { status: 303, headers: { ...baseHeaders, Location: "/" } });
+         return deps.auth.loginPage(request, baseHeaders);
+       }
+@@ -210,6 +219,10 @@ export function createHttpHandler(deps: HttpHandlerDependencies): HttpHandler {
+         if (url.pathname === "/api/chat" || url.pathname.startsWith("/api/chat/")) return json({ error: { code: "authentication_required", message: "로그인이 필요합니다." } }, 401);
+         if (url.pathname.startsWith("/api/")) return json({ error: "Authentication required" }, 401);
+         const next = `${url.pathname}${url.search}`;
++        if (localAutoLogin && request.method === "GET"
++          && !next.startsWith("//") && !next.includes("\\")) {
++          return deps.auth.startSession(next, baseHeaders, responseNetwork.secure);
++        }
+         return new Response(null, {
+           status: 303,
+           headers: { ...baseHeaders, Location: `/auth/login?next=${encodeURIComponent(next)}`, "Cache-Control": "no-store" },
+@@ -349,6 +362,11 @@ export function createHttpHandler(deps: HttpHandlerDependencies): HttpHandler {
+         return json({ error: "통합 관리의 Dream·자동화 또는 작업·활동에서 실행해 주세요.", code: "management_moved" }, 410);
+       }
+ 
++      if (url.pathname === "/api/document-search" && request.method === "GET") {
++        const query = url.searchParams.get("q")?.trim();
++        if (!query || query.length > 200) return json({ error: "Enter 1 to 200 characters" }, 400);
++        return json(await deps.graph.searchDocumentBodies(query));
++      }
+       if (url.pathname === "/api/node-detail" && request.method === "GET") {
+         const id = url.searchParams.get("id")?.trim();
+         if (!id || id.length > 1_024) return json({ error: "A valid node id is required" }, 400);
+diff --git a/src/components/DocumentExplorer.tsx b/src/components/DocumentExplorer.tsx
+index 5286a78..b8e68c5 100644
+--- a/src/components/DocumentExplorer.tsx
++++ b/src/components/DocumentExplorer.tsx
+@@ -1,6 +1,6 @@
+ import { getIntlLocale, getLanguage } from "../i18n";
+ import { ChevronLeft, ChevronRight, FileText, Search, Star, X } from "lucide-react";
+-import { useEffect, useMemo, useRef } from "react";
++import { useEffect, useMemo, useRef, useState } from "react";
+ import type { GraphResponse } from "../api/types";
+ import { DEFAULT_DOCUMENT_EXPLORER, DOCUMENT_PAGE_SIZE, filterDocuments, type DocumentExplorerState } from "../graph/document-explorer";
+ import { Button } from "./ui/button";
+@@ -21,7 +21,25 @@ export function DocumentExplorer({ graph, state, onChange, favorites, onToggleFa
+   const list = useRef<HTMLUListElement>(null);
+   const sources = useMemo(() => [...new Map(graph.nodes.map((node) => [node.sourceId, node.sourceName]))].sort((a, b) => a[1].localeCompare(b[1], "ko")), [graph]);
+   const types = useMemo(() => [...new Set(graph.nodes.map((node) => node.type))].sort(), [graph]);
+-  const matching = useMemo(() => filterDocuments(graph.nodes, state, favorites), [favorites, graph.nodes, state]);
++  const query = state.query.trim();
++  const [bodyResult, setBodyResult] = useState<{ query: string; ids?: Set<number> }>();
++  useEffect(() => {
++    if (!query || historical) return;
++    const controller = new AbortController();
++    const timer = window.setTimeout(async () => {
++      try {
++        const response = await fetch("/api/document-search?q=" + encodeURIComponent(query), { signal: controller.signal });
++        if (!response.ok) throw new Error("Search failed");
++        const ids: number[] = await response.json();
++        if (!controller.signal.aborted) setBodyResult({ query, ids: new Set(ids) });
++      } catch {
++        if (!controller.signal.aborted) setBodyResult({ query });
++      }
++    }, 200);
++    return () => { clearTimeout(timer); controller.abort(); };
++  }, [query, historical, graph.generatedAt]);
++  const bodyMatches = !historical && bodyResult?.query === query ? bodyResult.ids : undefined;
++  const matching = useMemo(() => filterDocuments(graph.nodes, state, favorites, bodyMatches), [favorites, graph.nodes, state, bodyMatches]);
+   const pages = Math.max(1, Math.ceil(matching.length / DOCUMENT_PAGE_SIZE));
+   const page = Math.min(state.page, pages);
+   const nodes = matching.slice((page - 1) * DOCUMENT_PAGE_SIZE, page * DOCUMENT_PAGE_SIZE);
+@@ -39,7 +57,7 @@ export function DocumentExplorer({ graph, state, onChange, favorites, onToggleFa
+       </div>
+       <div className="flex h-11 items-center gap-2 rounded-lg bg-background px-3 focus-within:ring-1 focus-within:ring-ring">
+         <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+-        <input aria-label="문서 목록 검색" value={state.query} maxLength={200} onChange={(event) => changeFilter({ query: event.target.value })} placeholder="제목, 경로, source, 유형 검색" className="min-w-0 flex-1 bg-transparent text-sm outline-none" />
++        <input aria-label="문서 목록 검색" value={state.query} maxLength={200} onChange={(event) => changeFilter({ query: event.target.value })} placeholder="제목, 본문, 경로, 유형 검색" className="min-w-0 flex-1 bg-transparent text-sm outline-none" />
+         {state.query && <button type="button" aria-label="문서 검색어 지우기" className="grid size-8 shrink-0 place-items-center rounded-md hover:bg-muted" onClick={() => changeFilter({ query: "" })}><X className="size-4" /></button>}
+       </div>
+       <div className="grid grid-cols-2 gap-2 lg:grid-cols-3">
+@@ -68,6 +86,7 @@ export function DocumentExplorer({ graph, state, onChange, favorites, onToggleFa
+         {filtered && <Button variant="ghost" onClick={() => onChange({ ...DEFAULT_DOCUMENT_EXPLORER, open: true, sort: state.sort })}>필터 초기화</Button>}
+         <span role="status" aria-live="polite" className="ml-auto text-xs text-muted-foreground">{getLanguage() === "ko" ? `${matching.length.toLocaleString(getIntlLocale())}개 결과` : `${matching.length.toLocaleString(getIntlLocale())} results`}</span>
+       </div>
++      {!historical && query && bodyResult?.query === query && !bodyMatches && <p role="status">본문 검색에 실패했습니다. 문서 정보에서 찾은 결과만 표시합니다.</p>}
+       {notice && <p role="status" className="text-xs text-amber-200">{notice}</p>}
+     </header>
+     <ul ref={list} aria-label="탐색 가능한 문서" className="min-h-0 flex-1 space-y-1 overflow-y-auto overscroll-contain px-2 pb-2">
+diff --git a/src/graph/document-explorer.ts b/src/graph/document-explorer.ts
+index cf8088d..e25b1c5 100644
+--- a/src/graph/document-explorer.ts
++++ b/src/graph/document-explorer.ts
+@@ -49,13 +49,13 @@ export function serializeDocumentExplorer(state: DocumentExplorerState, base = n
+ }
+ 
+ /** Full-snapshot document search, deliberately independent of the 20-result command palette. */
+-export function filterDocuments(nodes: readonly GraphNode[], state: DocumentExplorerState, favorites: ReadonlySet<string>): GraphNode[] {
++export function filterDocuments(nodes: readonly GraphNode[], state: DocumentExplorerState, favorites: ReadonlySet<string>, bodyMatches?: ReadonlySet<number>): GraphNode[] {
+   const tokens = normalizeGraphSearchText(state.query).split(" ").filter(Boolean);
+   const matching = nodes.filter((node) => {
+     if (state.sourceId && node.sourceId !== state.sourceId) return false;
+     if (state.type && node.type !== state.type) return false;
+     if (state.favoritesOnly && !favorites.has(node.id)) return false;
+-    if (!tokens.length) return true;
++    if (!tokens.length || bodyMatches?.has(node.dbId)) return true;
+     const fields = normalizeGraphSearchText([node.title, node.slug, node.type, node.sourceId, node.sourceName, node.groupLabel].join(" "));
+     return tokens.every((token) => fields.includes(token));
+   });
+diff --git a/src/locales/en.json b/src/locales/en.json
+index 3c1f17e..778d7f1 100644
+--- a/src/locales/en.json
++++ b/src/locales/en.json
+@@ -181,7 +181,7 @@
+   "선택한 기록 시점": "Selected history point",
+   "현재 지도 스냅샷": "Current map snapshot",
+   "문서 목록 검색": "Search document list",
+-  "제목, 경로, source, 유형 검색": "Search titles, paths, sources, and types",
++  "제목, 본문, 경로, 유형 검색": "Search titles, content, paths, and types",
+   "문서 검색어 지우기": "Clear document search",
+   "문서 Source": "Document source",
+   "모든 Source": "All sources",

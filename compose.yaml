@@ -1,0 +1,69 @@
+name: codex-gbrain-starter
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gbrain
+      POSTGRES_USER: gbrain
+      POSTGRES_PASSWORD: ${GBRAIN_PASSWORD:?Set GBRAIN_PASSWORD in .env}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "gbrain", "-d", "gbrain"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  gbrain:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GBRAIN_DATABASE_URL: postgresql://gbrain:${GBRAIN_PASSWORD}@postgres:5432/gbrain?sslmode=disable
+      HOME: /root
+    volumes:
+      - settings:/root/.gbrain
+      - ./notes:/seed:ro
+    command:
+      - sh
+      - -ec
+      - |
+        if [ ! -s /root/.gbrain/config.json ]; then
+          gbrain init --url "$$GBRAIN_DATABASE_URL" --no-embedding
+        fi
+        exec sleep infinity
+  webui:
+    build: ./webui
+    init: true
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: 3000
+      APP_LOCAL_AUTO_LOGIN: ${APP_LOCAL_AUTO_LOGIN:-false}
+      GBRAIN_DB_HOST: postgres
+      GBRAIN_DB_NAME: gbrain
+      GBRAIN_DB_USER: gbrain
+      GBRAIN_DB_PASSWORD: ${GBRAIN_PASSWORD}
+      APP_AUTH_PASSWORD: ${APP_AUTH_PASSWORD:?Set APP_AUTH_PASSWORD}
+      APP_SESSION_SECRET: ${APP_SESSION_SECRET:?Set APP_SESSION_SECRET}
+      APP_SNAPSHOT_PATH: /app-data/graph-snapshot.json
+    ports:
+      - "127.0.0.1:${WEBUI_PORT:-3100}:3000"
+
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app-data:uid=1000,gid=1000,mode=0700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+volumes:
+  database:
+  settings:
