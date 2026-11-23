@@ -1,12 +1,55 @@
 # 사내망에서 LibreChat과 Oh My Pi로 GBrain 공유하기
 
-팀 서버에 GBrain과 PostgreSQL을 한 번 설치합니다. LibreChat 서버와 각 팀원의 Oh My Pi는 같은 HTTPS 주소로 MCP 요청을 보내고, GBrain은 요청에 담긴 개인별 토큰으로 권한을 확인합니다. 팀원 PC에는 Docker가 필요하지 않습니다.
+팀 서버에 GBrain과 PostgreSQL을 한 번 설치합니다. LibreChat 서버와 각 팀원의 Oh My Pi는 같은 MCP 주소를 사용하고, GBrain은 개인별 토큰으로 권한을 확인합니다. 팀원 PC에는 Docker가 필요하지 않습니다.
 
-아래 기본 구성은 팀 전용 서버의 고정 IPv4 주소와 Nginx 컨테이너를 사용합니다. 예시 주소 `10.20.30.40`을 서버에 할당된 실제 사내 IP로 바꾸세요.
+예시 IP `10.20.30.40`을 서버에 할당된 고정 사내 IPv4 주소로 바꾸세요. 서버에 저장소를 복제하고 루트에서 `python setup.py`를 실행한 뒤 아래에서 한 가지 구성을 선택합니다.
 
-## 1. Nginx 컨테이너로 원격 MCP 시작
+## 1. 서버 연결 방식 선택
 
-1. 서버에 저장소를 복제하고 루트에서 `python setup.py`를 실행하세요. 생성된 `.env`에 `GBRAIN_LAN_IP=10.20.30.40`을 추가하세요. 호스트 포트는 기본 80입니다. 변경하려면 `GBRAIN_TLS_PORT`를 설정하고 아래 클라이언트 주소와 허용 목록에도 같은 포트를 쓰세요.
+| 구성 | LibreChat·Oh My Pi의 MCP URL | 서버에서 준비할 것 |
+|---|---|---|
+| GBrain 직접 연결 (평문 HTTP) | `http://10.20.30.40:80/mcp` | 고정 IP, 사용 가능한 TCP 80 |
+| Nginx 컨테이너 (HTTPS) | `https://10.20.30.40:80/mcp` | 고정 IP, IP SAN 인증서와 키 |
+| 기존 사내 HTTPS 프록시 | `https://brain.corp.example/mcp` | 사내 DNS와 HTTPS 프록시 |
+
+### 사내 IP와 80번 포트로 평문 HTTP 연결
+
+스타터에 포함된 MCP SDK는 `MCP_DANGEROUSLY_ALLOW_INSECURE_ISSUER_URL=true`로 설정하면 사내 IP의 HTTP 발급자 주소를 허용합니다. SDK는 이 옵션을 개발·테스트용으로 표시합니다. 개인별 토큰 인증은 계속 적용되지만 토큰과 문서 내용은 평문으로 전송되며, 같은 포트의 관리자 로그인 경로도 사내망에서 접근할 수 있습니다.
+
+1. 서버의 `.env`에 `GBRAIN_LAN_IP=10.20.30.40`을 추가합니다. 서버 방화벽에서 팀원과 LibreChat이 접속할 사내 대역에 TCP 80을 허용하세요.
+2. 저장소 루트에 다음 내용을 `compose.http.yaml`로 저장합니다.
+
+```yaml
+services:
+  gbrain:
+    ports:
+      - "${GBRAIN_LAN_IP:?Set GBRAIN_LAN_IP in .env}:80:3131"
+    environment:
+      MCP_DANGEROUSLY_ALLOW_INSECURE_ISSUER_URL: "true"
+      GBRAIN_PUBLIC_URL: http://${GBRAIN_LAN_IP:?Set GBRAIN_LAN_IP in .env}:80
+    command:
+      - sh
+      - -ec
+      - |
+        if [ ! -s /root/.gbrain/config.json ]; then
+          gbrain init --url "$$GBRAIN_DATABASE_URL" --no-embedding
+        fi
+        exec gbrain serve --http --bind 0.0.0.0 --port 3131 --public-url "$$GBRAIN_PUBLIC_URL"
+```
+
+3. 아래 명령으로 PostgreSQL과 GBrain을 실행하고, LibreChat 서버나 팀원 PC에서 발급자 주소를 조회합니다. JSON의 `issuer`가 해당 IP의 HTTP 주소이면 서버까지 연결된 것입니다. HTTP 기본 포트인 80은 응답에서 생략될 수 있습니다.
+
+```sh
+docker compose -f compose.yaml -f compose.http.yaml config --quiet
+docker compose -f compose.yaml -f compose.http.yaml up -d --build gbrain
+curl -fsS http://10.20.30.40:80/.well-known/oauth-authorization-server
+```
+
+4. 아래 2절에서 개인별 토큰을 발급합니다. 3절과 4절의 클라이언트 설정에서 `url`은 모두 `http://10.20.30.40:80/mcp`로 입력합니다. LibreChat의 `allowedAddresses` 값은 `10.20.30.40:80`입니다.
+
+### Nginx 컨테이너로 HTTPS 연결
+
+1. 생성된 `.env`에 `GBRAIN_LAN_IP=10.20.30.40`을 추가하세요. 호스트 포트는 기본 80입니다. 변경하려면 `GBRAIN_TLS_PORT`를 설정하고 아래 클라이언트 주소와 허용 목록에도 같은 포트를 쓰세요.
 2. 저장소 루트에 `tls/` 폴더를 만드세요. 사내 CA가 발급한 서버 인증서와 중간 인증서 체인을 `tls/fullchain.pem`, 대응하는 개인 키를 `tls/privkey.pem`으로 배치하세요. 인증서의 SAN에 실제 서버 주소가 IP 항목으로 들어 있어야 합니다. 개인 키는 서버 관리자만 읽을 수 있게 보관하세요. LibreChat 컨테이너와 Oh My Pi 실행 환경에는 사내 CA의 루트 인증서를 신뢰하도록 설정하세요.
 3. 같은 폴더에서 다음 명령을 실행하세요. 호스트의 해당 IP와 포트가 비어 있어야 합니다.
 
